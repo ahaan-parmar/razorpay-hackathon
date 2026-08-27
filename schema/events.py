@@ -44,17 +44,22 @@ class AttackType(str, Enum):
     BIN_SEQUENCING = "bin_sequencing"
     BIN_LIST_REUSE = "bin_list_reuse"
     CREDENTIAL_STUFFING = "credential_stuffing"
+    CREDENTIAL_STUFFING_EVASIVE = "credential_stuffing_evasive"
+    DISTRIBUTED_FINGERPRINT_TESTING = "distributed_fingerprint_testing"
+    FINGERPRINT_FLOOR_EVASION = "fingerprint_floor_evasion"
+    FINGERPRINT_ROTATION_SLOW_PACED = "fingerprint_rotation_slow_paced"
+    IP_FINGERPRINT_ROTATION = "ip_fingerprint_rotation"
     NONE = "none"
 
 
 class PaymentAttemptEvent(BaseModel):
-    event_id: str
+    event_id: str = Field(min_length=1)
     timestamp: datetime
 
     # actor identifiers
-    ip_address: str
+    ip_address: str = Field(min_length=1)
     device_fingerprint: Optional[str] = None
-    session_id: str
+    session_id: str = Field(min_length=1)
     account_id: Optional[str] = None  # None for guest checkout
 
     # card identifiers -- BIN + last4 only, never a full PAN

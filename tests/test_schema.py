@@ -47,6 +47,27 @@ def test_amount_must_be_positive():
         PaymentAttemptEvent(**_valid_kwargs(amount=-5))
 
 
+def test_amount_zero_is_rejected():
+    """gt=0 means the boundary value 0 itself must fail, not just negatives."""
+    with pytest.raises(ValidationError):
+        PaymentAttemptEvent(**_valid_kwargs(amount=0))
+
+
+def test_ip_address_cannot_be_empty():
+    with pytest.raises(ValidationError):
+        PaymentAttemptEvent(**_valid_kwargs(ip_address=""))
+
+
+def test_session_id_cannot_be_empty():
+    with pytest.raises(ValidationError):
+        PaymentAttemptEvent(**_valid_kwargs(session_id=""))
+
+
+def test_event_id_cannot_be_empty():
+    with pytest.raises(ValidationError):
+        PaymentAttemptEvent(**_valid_kwargs(event_id=""))
+
+
 def test_synthetic_label_fields_optional():
     event = PaymentAttemptEvent(
         **_valid_kwargs(is_abuse=True, attack_type=AttackType.CARD_TESTING_VELOCITY)

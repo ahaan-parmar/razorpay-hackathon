@@ -28,7 +28,9 @@ def log_event(
     log_path: str = DEFAULT_LOG_PATH,
 ) -> None:
     """Append one structured audit record for this evaluated event."""
-    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    log_dir = os.path.dirname(log_path)
+    if log_dir:
+        os.makedirs(log_dir, exist_ok=True)
     record = {
         "logged_at": datetime.now(timezone.utc).isoformat(),
         "event_id": event.event_id,

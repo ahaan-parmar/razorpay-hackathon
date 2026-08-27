@@ -472,6 +472,501 @@ def inject_bin_list_reuse(events: list[PaymentAttemptEvent], n_attacks: int) -> 
     return events + attack
 
 
+def inject_legit_microtransaction_burst(events: list[PaymentAttemptEvent], n_cases: int) -> list[PaymentAttemptEvent]:
+    """Inject n_cases of a legitimate high-frequency actor: a real customer
+    topping up in-game currency / making several small purchases back to
+    back, tight enough to cross check_velocity's 60s/5-attempt threshold
+    on its own. Labeled is_abuse=False, attack_type=NONE.
+
+    Hard negative -- unlike inject_flash_sale_shopper (10-45s spacing,
+    usually under the velocity threshold), this one is spaced tightly
+    enough (5-9s apart) to guarantee check_velocity fires alone. High
+    success rate and a single real card keep failure_ratio and
+    bin_sequencing silent, so this specifically tests whether one rule
+    firing (velocity) on a legitimate actor stays bounded to
+    flag_for_review/hold_for_verification rather than soft_decline.
+    """
+    attack = []
+    for _ in range(n_cases):
+        ip, device, session = _rand_ip(), _rand_hex(20), _rand_hex(24)
+        account = f"acct_{_rand_hex(10)}"
+        country = random.choice(_COUNTRIES)
+        card_bin, card_last4 = random.choice(_TEST_BIN_POOL), f"{random.randint(0, 9999):04d}"
+        n_attempts = random.randint(5, 9)
+        start = datetime.now(timezone.utc) - timedelta(hours=random.uniform(0, 72))
+        for i in range(n_attempts):
+            ts = start + timedelta(seconds=i * random.uniform(5.0, 9.0))
+            outcome = random.choices(
+                [AttemptOutcome.AUTHORIZED, AttemptOutcome.DECLINED], weights=[0.95, 0.05]
+            )[0]
+            attack.append(
+                PaymentAttemptEvent(
+                    event_id=_event_id(),
+                    timestamp=ts,
+                    ip_address=ip,
+                    device_fingerprint=device,
+                    session_id=session,
+                    account_id=account,
+                    card_bin=card_bin,
+                    card_last4=card_last4,
+                    card_network=random.choice(["visa", "mastercard"]),
+                    amount=round(random.uniform(20, 300), 2),
+                    currency="INR",
+                    outcome=outcome,
+                    decline_reason=None if outcome == AttemptOutcome.AUTHORIZED else "insufficient_funds",
+                    ip_country=country,
+                    account_country=country,
+                    source=EventSource.SYNTHETIC,
+                    is_abuse=False,
+                    attack_type=AttackType.NONE,
+                )
+            )
+    return events + attack
+
+
+def inject_credential_stuffing_evasive(events: list[PaymentAttemptEvent], n_attacks: int) -> list[PaymentAttemptEvent]:
+    """Inject n_attacks credential-stuffing sequences that route through a
+    residential proxy matching each stolen account's home country (so
+    ip_country == account_country every time) and use a moderate 55%
+    failure rate, labeled CREDENTIAL_STUFFING_EVASIVE.
+
+    Hard positive -- a more sophisticated attacker than
+    inject_credential_stuffing: deliberately evades check_geo_mismatch
+    (no mismatch at all, vs. the original's incidental ~5/6 mismatch
+    rate from independently-random countries) and, with failure_rate
+    under 0.7, evades check_failure_ratio too. Only
+    check_device_session_reuse (many distinct accounts, one device/
+    session) and check_velocity are expected to still catch it.
+    """
+    attack = []
+    for _ in range(n_attacks):
+        ip, device, session = _rand_ip(), _rand_hex(20), _rand_hex(24)
+        start = datetime.now(timezone.utc) - timedelta(hours=random.uniform(0, 72))
+        n_attempts = random.randint(30, 40)
+        for i in range(n_attempts):
+            ts = start + timedelta(seconds=i * random.uniform(0.5, 3.0))
+            outcome = random.choices(
+                [AttemptOutcome.FAILED, AttemptOutcome.AUTHORIZED], weights=[0.55, 0.45]
+            )[0]
+            country = random.choice(_COUNTRIES)
+            attack.append(
+                PaymentAttemptEvent(
+                    event_id=_event_id(),
+                    timestamp=ts,
+                    ip_address=ip,
+                    device_fingerprint=device,
+                    session_id=session,
+                    account_id=f"acct_{_rand_hex(10)}",
+                    card_bin=random.choice(_TEST_BIN_POOL),
+                    card_last4=f"{random.randint(0, 9999):04d}",
+                    card_network=random.choice(["visa", "mastercard"]),
+                    amount=round(random.uniform(100, 3000), 2),
+                    currency="INR",
+                    outcome=outcome,
+                    decline_reason=None if outcome == AttemptOutcome.AUTHORIZED else "authentication_failed",
+                    ip_country=country,
+                    account_country=country,
+                    source=EventSource.SYNTHETIC,
+                    is_abuse=True,
+                    attack_type=AttackType.CREDENTIAL_STUFFING_EVASIVE,
+                )
+            )
+    return events + attack
+
+
+def inject_distributed_fingerprint_testing(
+    events: list[PaymentAttemptEvent], n_attacks: int
+) -> list[PaymentAttemptEvent]:
+    """Inject n_attacks card-testing operations split across several distinct
+    device_fingerprint/session_id pairs sharing one ip_address, each doing
+    only a handful of attempts, labeled DISTRIBUTED_FINGERPRINT_TESTING.
+
+    Hard positive that targets the actor-grouping design itself, not a
+    single rule: detection/baseline.py's actor_key() groups by
+    device_fingerprint, falling back to ip_address only when
+    device_fingerprint is absent. An attacker rotating fingerprints
+    while reusing one IP (a real anti-fraud evasion technique) is
+    therefore split into several small, unremarkable per-fingerprint
+    groups that individually never cross any rule's threshold -- this
+    case exists to honestly test that structural gap, not to be
+    guaranteed-caught.
+    """
+    attack = []
+    for _ in range(n_attacks):
+        ip = _rand_ip()
+        n_identities = random.randint(5, 8)
+        for _ident in range(n_identities):
+            device, session = _rand_hex(20), _rand_hex(24)
+            # kept below 5 deliberately -- check_velocity/check_failure_ratio/
+            # check_timing_regularity all require >5 attempts (or min_attempts=5)
+            # to fire, so each per-fingerprint sub-group is invisible to every
+            # single-actor rule on its own by construction
+            n_attempts = random.randint(3, 4)
+            start = datetime.now(timezone.utc) - timedelta(hours=random.uniform(0, 6))
+            for i in range(n_attempts):
+                ts = start + timedelta(seconds=i * random.uniform(1.0, 4.0))
+                outcome = random.choices(
+                    [AttemptOutcome.DECLINED, AttemptOutcome.AUTHORIZED], weights=[0.85, 0.15]
+                )[0]
+                attack.append(
+                    PaymentAttemptEvent(
+                        event_id=_event_id(),
+                        timestamp=ts,
+                        ip_address=ip,
+                        device_fingerprint=device,
+                        session_id=session,
+                        account_id=None,
+                        card_bin=random.choice(_TEST_BIN_POOL),
+                        card_last4=f"{random.randint(0, 9999):04d}",
+                        card_network=random.choice(["visa", "mastercard"]),
+                        amount=round(random.uniform(1, 50), 2),
+                        currency="INR",
+                        outcome=outcome,
+                        decline_reason=(
+                            None if outcome == AttemptOutcome.AUTHORIZED else random.choice(_ATTACK_DECLINE_REASONS)
+                        ),
+                        ip_country=random.choice(_COUNTRIES),
+                        account_country=None,
+                        source=EventSource.SYNTHETIC,
+                        is_abuse=True,
+                        attack_type=AttackType.DISTRIBUTED_FINGERPRINT_TESTING,
+                    )
+                )
+    return events + attack
+
+
+def inject_shared_ip_household(events: list[PaymentAttemptEvent], n_cases: int) -> list[PaymentAttemptEvent]:
+    """Inject n_cases of a legitimate shared-IP scenario: 3-5 distinct
+    device fingerprints (household or small-office members) transacting
+    independently from one IP over about a week, labeled is_abuse=False,
+    attack_type=NONE.
+
+    Hard negative built specifically to stress-test IP-level correlation
+    (a planned second grouping dimension, alongside the existing
+    device_fingerprint-primary grouping -- see README). Each member's
+    own behavior is unremarkable on every existing signal (1-4 attempts,
+    ~92% success, one real card each, no BIN pattern), and each member
+    gets a distinct account_id, matching real distinct users rather than
+    one person switching devices. Start times are independently random
+    within the window rather than deliberately spread apart or
+    deliberately clustered, so some cases will have members who happen
+    to transact within the same few hours purely by chance -- an honest
+    test of whatever tight-window threshold the new rule ends up using,
+    not an artificially easy or artificially hard case.
+    """
+    attack = []
+    for _ in range(n_cases):
+        ip = _rand_ip()
+        n_members = random.randint(3, 5)
+        window_start = datetime.now(timezone.utc) - timedelta(days=random.uniform(1, 14))
+        for _member in range(n_members):
+            device, session = _rand_hex(20), _rand_hex(24)
+            account = f"acct_{_rand_hex(10)}"
+            card_bin, card_last4 = random.choice(_TEST_BIN_POOL), f"{random.randint(0, 9999):04d}"
+            country = random.choice(_COUNTRIES)
+            n_attempts = random.randint(1, 4)
+            member_start = window_start + timedelta(hours=random.uniform(0, 7 * 24))
+            for i in range(n_attempts):
+                ts = member_start + timedelta(hours=i * random.uniform(2, 30))
+                outcome = random.choices(
+                    [AttemptOutcome.AUTHORIZED, AttemptOutcome.DECLINED], weights=[0.92, 0.08]
+                )[0]
+                attack.append(
+                    PaymentAttemptEvent(
+                        event_id=_event_id(),
+                        timestamp=ts,
+                        ip_address=ip,
+                        device_fingerprint=device,
+                        session_id=session,
+                        account_id=account,
+                        card_bin=card_bin,
+                        card_last4=card_last4,
+                        card_network=random.choice(["visa", "mastercard"]),
+                        amount=round(random.uniform(150, 5000), 2),
+                        currency="INR",
+                        outcome=outcome,
+                        decline_reason=(
+                            None if outcome == AttemptOutcome.AUTHORIZED else random.choice(_BASELINE_DECLINE_REASONS)
+                        ),
+                        ip_country=country,
+                        account_country=country,
+                        source=EventSource.SYNTHETIC,
+                        is_abuse=False,
+                        attack_type=AttackType.NONE,
+                    )
+                )
+    return events + attack
+
+
+def inject_fingerprint_floor_evasion(events: list[PaymentAttemptEvent], n_attacks: int) -> list[PaymentAttemptEvent]:
+    """Inject n_attacks card-testing operations split across exactly 3 distinct
+    device_fingerprint/session_id pairs sharing one ip_address -- at, not
+    above, check_ip_cluster_activity's `min_fingerprints` floor -- labeled
+    FINGERPRINT_FLOOR_EVASION.
+
+    Hard positive targeting residual gap #1 from the README
+    ("Fingerprint-count floor"): check_ip_cluster_activity only fires
+    when a cluster exceeds `min_fingerprints` (default 3) distinct
+    fingerprints in-window. This case holds the fingerprint count at
+    exactly 3 (the rule's own condition is `fp_count > min_fingerprints`,
+    so 3 never trips it) while keeping each fingerprint's own volume
+    (3-4 attempts) below every per-actor rule's threshold too, and all 3
+    identities active within roughly the same hour so they are
+    unambiguously inside one 4-hour window together. Deliberately
+    constructed to be invisible to both grouping dimensions shipped so
+    far -- this case exists to honestly test that gap, not to be
+    guaranteed-caught.
+    """
+    attack = []
+    for _ in range(n_attacks):
+        ip = _rand_ip()
+        window_start = datetime.now(timezone.utc) - timedelta(hours=random.uniform(0, 72))
+        for _ident in range(3):
+            device, session = _rand_hex(20), _rand_hex(24)
+            n_attempts = random.randint(3, 4)
+            start = window_start + timedelta(minutes=random.uniform(0, 45))
+            for i in range(n_attempts):
+                ts = start + timedelta(seconds=i * random.uniform(1.0, 4.0))
+                outcome = random.choices(
+                    [AttemptOutcome.DECLINED, AttemptOutcome.AUTHORIZED], weights=[0.85, 0.15]
+                )[0]
+                attack.append(
+                    PaymentAttemptEvent(
+                        event_id=_event_id(),
+                        timestamp=ts,
+                        ip_address=ip,
+                        device_fingerprint=device,
+                        session_id=session,
+                        account_id=None,
+                        card_bin=random.choice(_TEST_BIN_POOL),
+                        card_last4=f"{random.randint(0, 9999):04d}",
+                        card_network=random.choice(["visa", "mastercard"]),
+                        amount=round(random.uniform(1, 50), 2),
+                        currency="INR",
+                        outcome=outcome,
+                        decline_reason=(
+                            None if outcome == AttemptOutcome.AUTHORIZED else random.choice(_ATTACK_DECLINE_REASONS)
+                        ),
+                        ip_country=random.choice(_COUNTRIES),
+                        account_country=None,
+                        source=EventSource.SYNTHETIC,
+                        is_abuse=True,
+                        attack_type=AttackType.FINGERPRINT_FLOOR_EVASION,
+                    )
+                )
+    return events + attack
+
+
+def inject_fingerprint_rotation_slow_paced(
+    events: list[PaymentAttemptEvent], n_attacks: int
+) -> list[PaymentAttemptEvent]:
+    """Inject n_attacks card-testing operations split across 5-8 distinct
+    device_fingerprint/session_id pairs sharing one ip_address, like
+    inject_distributed_fingerprint_testing, but with each identity's
+    short burst introduced 5-7 hours apart -- wider than
+    check_ip_cluster_activity's 4-hour window -- labeled
+    FINGERPRINT_ROTATION_SLOW_PACED.
+
+    Hard positive targeting residual gap #2 from the README ("Pacing
+    beyond the window"): the sliding window fixes the bucket-boundary
+    failure mode, but does nothing against an attacker who paces
+    fingerprint introduction slower than the window itself. At any given
+    moment at most 1-2 identities are ever active in the same 4-hour
+    window, even though the campaign totals 5-8 identities over 1-2+
+    days -- this case exists to honestly test that gap, not to be
+    guaranteed-caught.
+    """
+    attack = []
+    for _ in range(n_attacks):
+        ip = _rand_ip()
+        n_identities = random.randint(5, 8)
+        campaign_start = datetime.now(timezone.utc) - timedelta(hours=random.uniform(48, 96))
+        for ident in range(n_identities):
+            device, session = _rand_hex(20), _rand_hex(24)
+            n_attempts = random.randint(3, 4)
+            start = campaign_start + timedelta(hours=ident * random.uniform(5.0, 7.0))
+            for i in range(n_attempts):
+                ts = start + timedelta(seconds=i * random.uniform(1.0, 4.0))
+                outcome = random.choices(
+                    [AttemptOutcome.DECLINED, AttemptOutcome.AUTHORIZED], weights=[0.85, 0.15]
+                )[0]
+                attack.append(
+                    PaymentAttemptEvent(
+                        event_id=_event_id(),
+                        timestamp=ts,
+                        ip_address=ip,
+                        device_fingerprint=device,
+                        session_id=session,
+                        account_id=None,
+                        card_bin=random.choice(_TEST_BIN_POOL),
+                        card_last4=f"{random.randint(0, 9999):04d}",
+                        card_network=random.choice(["visa", "mastercard"]),
+                        amount=round(random.uniform(1, 50), 2),
+                        currency="INR",
+                        outcome=outcome,
+                        decline_reason=(
+                            None if outcome == AttemptOutcome.AUTHORIZED else random.choice(_ATTACK_DECLINE_REASONS)
+                        ),
+                        ip_country=random.choice(_COUNTRIES),
+                        account_country=None,
+                        source=EventSource.SYNTHETIC,
+                        is_abuse=True,
+                        attack_type=AttackType.FINGERPRINT_ROTATION_SLOW_PACED,
+                    )
+                )
+    return events + attack
+
+
+def inject_ip_fingerprint_rotation(events: list[PaymentAttemptEvent], n_attacks: int) -> list[PaymentAttemptEvent]:
+    """Inject n_attacks card-testing operations split across 5-8 identities
+    that each rotate BOTH ip_address and device_fingerprint/session_id
+    together (e.g. a residential proxy pool), all within a several-hour
+    campaign window, labeled IP_FINGERPRINT_ROTATION.
+
+    Hard positive targeting residual gap #3 from the README ("IP
+    rotation is not addressed at all"): unlike
+    inject_distributed_fingerprint_testing (one shared IP, many
+    fingerprints), each identity here gets its own IP as well, so
+    group_by_ip never merges any of them into a cluster either --
+    invisible to both grouping dimensions simultaneously. This case
+    exists to honestly test that gap, not to be guaranteed-caught.
+    """
+    attack = []
+    for _ in range(n_attacks):
+        n_identities = random.randint(5, 8)
+        campaign_start = datetime.now(timezone.utc) - timedelta(hours=random.uniform(0, 72))
+        for ident in range(n_identities):
+            ip, device, session = _rand_ip(), _rand_hex(20), _rand_hex(24)
+            n_attempts = random.randint(3, 4)
+            start = campaign_start + timedelta(minutes=ident * random.uniform(15.0, 45.0))
+            for i in range(n_attempts):
+                ts = start + timedelta(seconds=i * random.uniform(1.0, 4.0))
+                outcome = random.choices(
+                    [AttemptOutcome.DECLINED, AttemptOutcome.AUTHORIZED], weights=[0.85, 0.15]
+                )[0]
+                attack.append(
+                    PaymentAttemptEvent(
+                        event_id=_event_id(),
+                        timestamp=ts,
+                        ip_address=ip,
+                        device_fingerprint=device,
+                        session_id=session,
+                        account_id=None,
+                        card_bin=random.choice(_TEST_BIN_POOL),
+                        card_last4=f"{random.randint(0, 9999):04d}",
+                        card_network=random.choice(["visa", "mastercard"]),
+                        amount=round(random.uniform(1, 50), 2),
+                        currency="INR",
+                        outcome=outcome,
+                        decline_reason=(
+                            None if outcome == AttemptOutcome.AUTHORIZED else random.choice(_ATTACK_DECLINE_REASONS)
+                        ),
+                        ip_country=random.choice(_COUNTRIES),
+                        account_country=None,
+                        source=EventSource.SYNTHETIC,
+                        is_abuse=True,
+                        attack_type=AttackType.IP_FINGERPRINT_ROTATION,
+                    )
+                )
+    return events + attack
+
+
+def inject_large_office_network(events: list[PaymentAttemptEvent], n_cases: int) -> list[PaymentAttemptEvent]:
+    """Inject n_cases of a legitimate large shared-IP scenario: 10-15
+    distinct device fingerprints (a big office or NAT) transacting
+    independently from one IP over about two weeks, PLUS a coincidental
+    correlated-failure event -- a subset of members sharing one
+    now-expired corporate card, all declined within the same afternoon
+    -- labeled is_abuse=False, attack_type=NONE.
+
+    Hard negative targeting the README's residual gap #4 ("untested
+    scale on the hard negative itself"): inject_shared_ip_household only
+    covers 3-5 members with independently random failures; this covers
+    10-15 members AND deliberately clusters several members' failures
+    into the same narrow window (same card, same reason, same
+    afternoon) -- the specific plausible false-positive shape flagged as
+    untested, not a softened version of it.
+    """
+    attack = []
+    for _ in range(n_cases):
+        ip = _rand_ip()
+        n_members = random.randint(10, 15)
+        window_start = datetime.now(timezone.utc) - timedelta(days=random.uniform(1, 14))
+        members = []
+        for _member in range(n_members):
+            device, session = _rand_hex(20), _rand_hex(24)
+            account = f"acct_{_rand_hex(10)}"
+            country = random.choice(_COUNTRIES)
+            members.append((device, session, account, country))
+
+        # Normal, independent usage for every member across the window --
+        # same shape as inject_shared_ip_household, just more members.
+        for device, session, account, country in members:
+            n_attempts = random.randint(1, 4)
+            member_start = window_start + timedelta(hours=random.uniform(0, 14 * 24))
+            for i in range(n_attempts):
+                ts = member_start + timedelta(hours=i * random.uniform(2, 30))
+                outcome = random.choices(
+                    [AttemptOutcome.AUTHORIZED, AttemptOutcome.DECLINED], weights=[0.92, 0.08]
+                )[0]
+                attack.append(
+                    PaymentAttemptEvent(
+                        event_id=_event_id(),
+                        timestamp=ts,
+                        ip_address=ip,
+                        device_fingerprint=device,
+                        session_id=session,
+                        account_id=account,
+                        card_bin=random.choice(_TEST_BIN_POOL),
+                        card_last4=f"{random.randint(0, 9999):04d}",
+                        card_network=random.choice(["visa", "mastercard"]),
+                        amount=round(random.uniform(150, 5000), 2),
+                        currency="INR",
+                        outcome=outcome,
+                        decline_reason=(
+                            None if outcome == AttemptOutcome.AUTHORIZED else random.choice(_BASELINE_DECLINE_REASONS)
+                        ),
+                        ip_country=country,
+                        account_country=country,
+                        source=EventSource.SYNTHETIC,
+                        is_abuse=False,
+                        attack_type=AttackType.NONE,
+                    )
+                )
+
+        # The coincidental correlated-failure event: several employees
+        # sharing one now-expired corporate card, all trying and
+        # declining within the same afternoon.
+        affected = random.sample(members, k=random.randint(4, 6))
+        corporate_bin, corporate_last4 = random.choice(_TEST_BIN_POOL), f"{random.randint(0, 9999):04d}"
+        afternoon_start = window_start + timedelta(hours=random.uniform(0, 14 * 24))
+        for device, session, account, country in affected:
+            ts = afternoon_start + timedelta(minutes=random.uniform(0, 150))
+            attack.append(
+                PaymentAttemptEvent(
+                    event_id=_event_id(),
+                    timestamp=ts,
+                    ip_address=ip,
+                    device_fingerprint=device,
+                    session_id=session,
+                    account_id=account,
+                    card_bin=corporate_bin,
+                    card_last4=corporate_last4,
+                    card_network="visa",
+                    amount=round(random.uniform(500, 4000), 2),
+                    currency="INR",
+                    outcome=AttemptOutcome.DECLINED,
+                    decline_reason="expired_card",
+                    ip_country=country,
+                    account_country=country,
+                    source=EventSource.SYNTHETIC,
+                    is_abuse=False,
+                    attack_type=AttackType.NONE,
+                )
+            )
+    return events + attack
+
+
 def build_dataset(
     seed: int,
     n_baseline: int = 2000,
@@ -480,9 +975,17 @@ def build_dataset(
     n_stuffing_attacks: int = 3,
     n_low_and_slow_attacks: int = 3,
     n_bin_reuse_attacks: int = 3,
+    n_stuffing_evasive_attacks: int = 3,
+    n_distributed_fingerprint_attacks: int = 3,
+    n_fingerprint_floor_evasion_attacks: int = 3,
+    n_fingerprint_rotation_slow_paced_attacks: int = 3,
+    n_ip_fingerprint_rotation_attacks: int = 3,
     n_retry_bursts: int = 15,
     n_flash_sale_cases: int = 12,
     n_insufficient_funds_cases: int = 12,
+    n_microtransaction_cases: int = 12,
+    n_shared_ip_household_cases: int = 12,
+    n_large_office_cases: int = 8,
     attack_size: int = 40,
 ) -> list[PaymentAttemptEvent]:
     """Assemble one full labeled dataset: baseline traffic + several
@@ -502,9 +1005,17 @@ def build_dataset(
             events = inject_credential_stuffing(events, attack_size)
         events = inject_card_testing_low_and_slow(events, n_low_and_slow_attacks)
         events = inject_bin_list_reuse(events, n_bin_reuse_attacks)
+        events = inject_credential_stuffing_evasive(events, n_stuffing_evasive_attacks)
+        events = inject_distributed_fingerprint_testing(events, n_distributed_fingerprint_attacks)
+        events = inject_fingerprint_floor_evasion(events, n_fingerprint_floor_evasion_attacks)
+        events = inject_fingerprint_rotation_slow_paced(events, n_fingerprint_rotation_slow_paced_attacks)
+        events = inject_ip_fingerprint_rotation(events, n_ip_fingerprint_rotation_attacks)
         events = inject_legit_retry_burst(events, n_retry_bursts)
         events = inject_flash_sale_shopper(events, n_flash_sale_cases)
         events = inject_insufficient_funds_retry(events, n_insufficient_funds_cases)
+        events = inject_legit_microtransaction_burst(events, n_microtransaction_cases)
+        events = inject_shared_ip_household(events, n_shared_ip_household_cases)
+        events = inject_large_office_network(events, n_large_office_cases)
         random.shuffle(events)
     finally:
         random.setstate(rng_state)

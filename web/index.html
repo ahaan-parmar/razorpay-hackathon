@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Audit Trail — Checkout Abuse Detector</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="styles.css" />
+<script>
+  // Set the theme attribute before first paint to avoid a flash of the
+  // wrong theme. Defaults to dark (not system preference) per project
+  // choice; a saved manual toggle always wins.
+  (function () {
+    try {
+      var saved = localStorage.getItem("theme");
+      document.documentElement.dataset.theme = saved === "light" ? "light" : "dark";
+    } catch (e) {
+      document.documentElement.dataset.theme = "dark";
+    }
+  })();
+</script>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar-left">
+    <div class="eyebrow">Checkout / Card-Testing Abuse Detector</div>
+    <h1>Audit Trail</h1>
+    <p class="subhead">Every scored event, the rules that fired, and the bounded action taken.</p>
+  </div>
+  <div class="topbar-right">
+    <button id="themeToggle" class="theme-toggle" type="button" aria-label="Toggle dark mode" title="Toggle theme">
+      <svg class="icon-sun" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
+      <svg class="icon-moon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+    </button>
+    <div class="conn-status" id="connStatus" data-state="loading">
+      <span class="conn-dot"></span>
+      <span class="conn-label">Connecting…</span>
+    </div>
+  </div>
+</header>
+
+<div id="errorBanner" class="error-banner" hidden>
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+  <div>
+    <strong>Can't reach the export API.</strong>
+    <span id="errorDetail">Start it with <code>uvicorn export.server:app --reload --port 8000</code> from the project root, then reload this page.</span>
+  </div>
+</div>
+
+<main>
+
+  <section class="headline-band" id="headlineBand" aria-busy="true">
+    <div class="headline-primary">
+      <div class="headline-label">Estimated $-cost, held-out set</div>
+      <div class="headline-value" id="totalCost">—</div>
+      <div class="headline-breakdown" id="costBreakdown">—</div>
+    </div>
+    <div class="headline-secondary">
+      <div class="mini-stat">
+        <div class="mini-label">Precision</div>
+        <div class="mini-value" id="statPrecision">—</div>
+      </div>
+      <div class="mini-stat">
+        <div class="mini-label">Recall</div>
+        <div class="mini-value" id="statRecall">—</div>
+      </div>
+      <div class="mini-stat">
+        <div class="mini-label">FP rate</div>
+        <div class="mini-value" id="statFpRate">—</div>
+      </div>
+      <div class="mini-stat">
+        <div class="mini-label">Actors scored</div>
+        <div class="mini-value" id="statActors">—</div>
+      </div>
+    </div>
+  </section>
+
+  <table class="confusion-table">
+    <tbody>
+      <tr>
+        <th>TP</th><td id="cmTP">—</td>
+        <th>FP</th><td id="cmFP">—</td>
+        <th>TN</th><td id="cmTN">—</td>
+        <th>FN</th><td id="cmFN">—</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="notes">
+    <p>Bursty legitimate customers are never hard-blocked: <code>soft_decline</code> requires two rules firing or confidence ≥ 0.8, so a real customer's retry burst, an insufficient-funds card, or a high-frequency purchase run lands at worst on <code>hold_for_verification</code> or <code>flag_for_review</code>.</p>
+    <p>Known gap: fingerprint rotation across a shared IP is now caught via cross-fingerprint IP-cluster correlation (<code>ip_cluster_activity</code>), but an attacker who also rotates the IP address itself, not just the device fingerprint, evades both grouping dimensions and is not detected.</p>
+  </div>
+
+  <section class="table-section">
+    <div class="table-toolbar">
+      <div class="search-wrap">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <input type="text" id="searchInput" placeholder="Search actor, rule, or explanation…" autocomplete="off" />
+      </div>
+
+      <div class="chip-group" id="actionChips" role="group" aria-label="Filter by decision"></div>
+
+      <label class="toggle">
+        <input type="checkbox" id="showNoAction" />
+        <span>Show no_action</span>
+      </label>
+
+      <label class="toggle">
+        <input type="checkbox" id="liveOnly" />
+        <span>Live only</span>
+      </label>
+
+      <div class="toolbar-spacer"></div>
+      <div class="row-count" id="rowCount">—</div>
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th class="sortable" data-sort="event_timestamp">Time <span class="sort-caret"></span></th>
+            <th>Actor</th>
+            <th>Rules fired</th>
+            <th class="sortable" data-sort="confidence">Confidence <span class="sort-caret"></span></th>
+            <th class="sortable" data-sort="action">Decision <span class="sort-caret"></span></th>
+            <th>Mode</th>
+            <th>Explanation</th>
+          </tr>
+        </thead>
+        <tbody id="tableBody">
+          <tr class="empty-row"><td colspan="7">Loading audit log…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+</main>
+
+<footer class="pagefoot">
+  <span id="datasetNote">—</span>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>

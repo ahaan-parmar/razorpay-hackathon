@@ -49,20 +49,34 @@ def _evidence_summary(evaluation: ActorEvaluation) -> str:
 
 
 def _call_ollama(prompt: str) -> str:
-    response = requests.post(
-        f"{settings.ollama_host}/api/chat",
-        json={
-            "model": settings.ollama_model,
-            "messages": [
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            "stream": False,
-        },
-        timeout=60,
-    )
+    try:
+        response = requests.post(
+            f"{settings.ollama_host}/api/chat",
+            json={
+                "model": settings.ollama_model,
+                "messages": [
+                    {"role": "system", "content": _SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+                "stream": False,
+            },
+            timeout=60,
+        )
+    except requests.exceptions.ConnectionError as e:
+        raise RuntimeError(
+            f"Could not reach Ollama at {settings.ollama_host} -- is `ollama serve` running? "
+            f"(OLLAMA_HOST in .env if it's elsewhere)"
+        ) from e
+    except requests.exceptions.Timeout as e:
+        raise RuntimeError(f"Ollama at {settings.ollama_host} didn't respond within 60s") from e
     response.raise_for_status()
-    return response.json()["message"]["content"].strip()
+    try:
+        return response.json()["message"]["content"].strip()
+    except (KeyError, ValueError) as e:
+        raise RuntimeError(
+            f"Unexpected response shape from Ollama -- is model '{settings.ollama_model}' pulled? "
+            f"(`ollama pull {settings.ollama_model}`). Raw response: {response.text[:300]}"
+        ) from e
 
 
 def explain_and_rank(evaluations: list[ActorEvaluation]) -> list[TriageExplanation]:

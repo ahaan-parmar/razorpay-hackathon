@@ -5,6 +5,8 @@ python-dotenv
 razorpay
 requests
 pytest
+fastapi
+uvicorn
 # only needed if HTTPS calls fail with CERTIFICATE_VERIFY_FAILED against a
 # cert your OS trusts but Python's bundled certifi doesn't (e.g. antivirus/
 # corporate TLS interception) -- makes Python defer to the OS trust store

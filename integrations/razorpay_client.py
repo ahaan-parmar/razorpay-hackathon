@@ -29,6 +29,11 @@ import razorpay
 
 from config import settings
 
+# The razorpay SDK sets no request timeout by default (verified against
+# its source -- see self-review notes), so a hung connection would block
+# forever without this.
+REQUEST_TIMEOUT_SECONDS = 30
+
 _client: razorpay.Client | None = None
 
 
@@ -47,6 +52,8 @@ def create_order(amount: float, receipt_id: str, currency: str = "INR") -> dict:
     """Create a real test-mode Razorpay order. `amount` is in rupees (converted
     to paise for the API call). Returns the raw order response dict.
     """
+    if amount <= 0:
+        raise ValueError(f"amount must be positive, got {amount}")
     client = _get_client()
     return client.order.create(
         {
@@ -54,14 +61,15 @@ def create_order(amount: float, receipt_id: str, currency: str = "INR") -> dict:
             "currency": currency,
             "receipt": receipt_id,
             "payment_capture": 0,
-        }
+        },
+        timeout=REQUEST_TIMEOUT_SECONDS,
     )
 
 
 def fetch_payment(payment_id: str) -> dict:
     """Fetch a real payment by id. Returns the raw payment response dict."""
     client = _get_client()
-    return client.payment.fetch(payment_id)
+    return client.payment.fetch(payment_id, timeout=REQUEST_TIMEOUT_SECONDS)
 
 
 def capture_payment(payment_id: str, amount: float, currency: str = "INR") -> dict:
@@ -69,5 +77,9 @@ def capture_payment(payment_id: str, amount: float, currency: str = "INR") -> di
     paise) and must match the original payment amount. Returns the raw
     payment response dict.
     """
+    if amount <= 0:
+        raise ValueError(f"amount must be positive, got {amount}")
     client = _get_client()
-    return client.payment.capture(payment_id, round(amount * 100), {"currency": currency})
+    return client.payment.capture(
+        payment_id, round(amount * 100), {"currency": currency}, timeout=REQUEST_TIMEOUT_SECONDS
+    )

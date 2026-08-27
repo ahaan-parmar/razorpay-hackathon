@@ -13,6 +13,12 @@ limitation in the README) rather than the full multi-key grouping
 bots typically hold one device/session fixed while rotating cards, so
 this axis catches the injected attack patterns while staying within
 10-day scope.
+
+group_by_ip() is a second, independent grouping added specifically for
+detection/rules.py's check_ip_cluster_activity -- it does not replace
+actor_key()/group_by_actor() above, and nothing else in this module
+uses it. See that rule's docstring for why fingerprint-rotating
+attackers need this second dimension.
 """
 
 from __future__ import annotations
@@ -30,6 +36,14 @@ class PopulationBaseline:
     median_timing_cv: float
 
 
+# Fallbacks used only when a reference batch has too few qualifying actor
+# groups to compute a real median (e.g. an empty or tiny batch) -- chosen
+# to represent an unremarkable single-attempt actor, not a measured value.
+_FALLBACK_MEDIAN_ATTEMPTS = 1.0
+_FALLBACK_MEDIAN_FAILURE_RATIO = 0.1
+_FALLBACK_MEDIAN_TIMING_CV = 0.5
+
+
 def actor_key(event: PaymentAttemptEvent) -> str:
     return event.device_fingerprint or event.ip_address
 
@@ -38,6 +52,20 @@ def group_by_actor(events: list[PaymentAttemptEvent]) -> dict[str, list[PaymentA
     groups: dict[str, list[PaymentAttemptEvent]] = {}
     for e in events:
         groups.setdefault(actor_key(e), []).append(e)
+    return groups
+
+
+def group_by_ip(events: list[PaymentAttemptEvent]) -> dict[str, list[PaymentAttemptEvent]]:
+    """Group the full batch by ip_address alone, ignoring device_fingerprint.
+
+    Unlike group_by_actor, this deliberately merges events from many
+    different fingerprints that share one IP -- that's the whole point,
+    for check_ip_cluster_activity to see coordinated activity across
+    fingerprints that group_by_actor keeps artificially separated.
+    """
+    groups: dict[str, list[PaymentAttemptEvent]] = {}
+    for e in events:
+        groups.setdefault(e.ip_address, []).append(e)
     return groups
 
 
@@ -66,9 +94,9 @@ def compute_population_baseline(reference_events: list[PaymentAttemptEvent]) -> 
     failure_ratios = [failure_ratio(g) for g in groups.values() if len(g) >= 2]
     cvs = [timing_cv(g) for g in groups.values() if len(g) >= 3]
     return PopulationBaseline(
-        median_attempts_per_actor=statistics.median(attempts) if attempts else 1.0,
-        median_failure_ratio=statistics.median(failure_ratios) if failure_ratios else 0.1,
-        median_timing_cv=statistics.median(cvs) if cvs else 0.5,
+        median_attempts_per_actor=statistics.median(attempts) if attempts else _FALLBACK_MEDIAN_ATTEMPTS,
+        median_failure_ratio=statistics.median(failure_ratios) if failure_ratios else _FALLBACK_MEDIAN_FAILURE_RATIO,
+        median_timing_cv=statistics.median(cvs) if cvs else _FALLBACK_MEDIAN_TIMING_CV,
     )
 
 
